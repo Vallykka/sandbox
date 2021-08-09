@@ -16,34 +16,23 @@
     {:firstname "Boris"
      :lastname  "Henry"
      :diagnosis "Healthy"
-     :treated   false}
-    {:firstname "Johnny"
-     :lastname  "Grayhand"
-     :diagnosis "COVID-76"
-     :treated   false}))
+     :treated   false
+     {:firstname "Johnny"
+      :lastname  "Grayhand"
+      :diagnosis "COVID-76"
+      :treated   false}}))
 
 (defmacro factor-group
   "Factor group + local bindings macros"
-  [data bbb bindings & body]
-  (let [binds (apply assoc {} bindings)
-        grouped (group-by #((apply juxt (vals binds)) %)
-                          @(resolve data))
-        results (reduce (fn [vect entr]
-                          (conj vect (mapv identity (mapcat identity entr))))
-                        []
-                        (map #(apply merge {} %)
-                             (map (fn [[k v]]
-                                    (merge
-                                      (map (fn [[k1 v1]]
-                                             (assoc {} k1 (get (first v) v1)))
-                                           binds)
-                                      {bbb v}))
-                                  grouped)))]
-    `(list ~@(map (fn [r#]
-                    `(let ~r# ~@body))
-               results))
-    )
-  )
+  [data group-name bindings & body]
+  `(list ~@(map (fn [r#] `(let ~r# ~@body))
+                (map (fn [[group-key# patients#]]
+                    (vec (concat (into []
+                                       (flatten (map (fn [b#] [(first b#) (get (first patients#) (second b#))])
+                                                     (partition 2 bindings))))
+                                 [group-name patients#])))
+                  (group-by (apply juxt (filter #(keyword? %) bindings))
+                            @(resolve data))))))
 
 (defmacro test-factor-group
   []
@@ -70,10 +59,13 @@
 
 (defmacro extended->>
   [expr alias & forms]
-  `(try
-     (as-> ~expr ~alias ~@forms)
-     (catch Exception e# nil))
-  )
+  (let [a alias
+        steps (map (fn [step] `(if (nil? ~a) nil ~step)) forms)]
+    `(let [~alias ~expr
+           ~@(interleave (repeat alias) (butlast steps))]
+       ~(if (empty? steps)
+          alias
+          (last steps)))))
 
 (defmacro test-extended->>
   []
@@ -83,11 +75,17 @@
 
 (defmacro multitry
   [& forms]
-  (first (drop-while #(and (keyword? %) (= :error %))
-                                 (map (fn [form#]
-                                          (try `~(eval form#)
-                                               (catch Exception e :error)))
-                                        forms))))
+  (if-not (empty? forms)
+    (let [form (first forms)
+          rest (rest forms)
+          res  `(try
+                  ~form
+                  (catch Exception e# :invalid))]
+      `(if-not (= ~res :invalid)
+        ~res
+        (multitry ~@rest))
+     )))
+
 
 (defmacro test-multitry
   []
