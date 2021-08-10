@@ -25,13 +25,14 @@
 (defmacro factor-group
   "Factor group + local bindings macros"
   [data group-name bindings & body]
-  (let [binds (apply assoc {} bindings)
-        grouped (group-by #((apply juxt (vals binds)) %) @(resolve data))]
-    `(for [[group-key# ~group-name] ~grouped
-           :let [new-binds# (map (fn [[k# v#]] [k# (get (first ~group-name) v#)]) ~binds)]]
-       (do ~@body))))
+  (assert ((apply every-pred [some? (comp even? count)]) (not-empty bindings))
+    (format "invalid bindings: %s" bindings))
+  (let [group-keys (vec (filter #(keyword? %) bindings))]
+    `(let [grouped# (map #(apply list %) (group-by #(select-keys % ~group-keys) ~data))]
+       (for [[~(apply assoc {} bindings) ~group-name] grouped#]
+        (do ~@body)))))
 
-(comment defmacro test-factor-group
+(defmacro test-factor-group
   []
   (assert (= '(2 1 1 1) (factor-group all-patients patients-group [treated? :treated
                                                                     disease-name :diagnosis]
@@ -72,12 +73,10 @@
 (defmacro multitry
   [& [form & rest :as forms]]
   (if-not (empty? forms)
-   (let [res `(try
-                ~form
-                (catch Exception e# :invalid))]
-     `(if-not (= ~res :invalid)
-        ~res
-        (multitry ~@rest)))))
+    `(try
+       ~form
+       (catch Exception e#
+         (multitry ~@rest)))))
 
 (defmacro test-multitry
   []
