@@ -12,16 +12,19 @@
 
 (defmacro column
   [name type]
-  (let [[name-string type-string] (s/conform ::valid-str-params [name type])]
-    (when (s/valid? ::valid-str-params [name type])
-      (->Column name-string type-string (get types-conformers type-string)))))
+  (let [result (s/conform ::valid-str-params [name type])]
+    (if-not (= ::s/invalid result)
+      (let [[name-string type-string] result]
+        (->Column name-string type-string (get types-conformers type-string)))
+      (throw (ex-info (s/explain-str ::valid-str-params [name type]) {})))))
 
 (defmacro deftable
   [name & forms]
   (let [name-string (s/conform ::valid-str-param name)
         columns (mapv (fn [form] (macroexpand-1 form)) forms)]
-    (when-not (= ::s/invalid name-string)
-      (swap! table-container assoc name-string (->Table name-string columns)))))
+    (if-not (= ::s/invalid name-string)
+      (swap! table-container assoc name-string (->Table name-string columns))
+      (throw (ex-info (s/explain-str ::valid-str-params [name type]) {})))))
 
 (defmacro from
   [& [table & fields]]
@@ -37,18 +40,18 @@
 
 (defmacro gensql
   [& body]
-  (if-not (s/valid? ::gensql body)
-    (s/explain-data ::gensql body)
+  (if (s/valid? ::gensql body)
     (let [locals (into {} (for [local (keys &env)] [(name local) local]))]
       `(let [table# (get @table-container ~(name (second (first body))))
-             column-conformer# (apply merge (map (fn [col#] {(:name col#) (:conformer col#)}) (:columns table#)))
+             column-conformer# (reduce merge (map (fn [col#] {(:name col#) (:conformer col#)}) (:columns table#)))
              column-parameter# (merge {} ~@(map (fn [[q column op value-param]]
-                                                  (when (= (str q) "where") {(name column) (str value-param)}))
+                                                  (when (= q 'where) {(name column) (str value-param)}))
                                                 (rest body)))
              mapped-vals# (for [[k# v#] column-parameter#]
                             [v# (str (s/conform (get column-conformer# k#) (get ~locals v#)))])
-             query# (apply str ~@body)]
-         (reduce #(apply str/replace %1 %2) query# mapped-vals#)))))
+             query# (reduce str ~@body)]
+         (reduce #(apply str/replace %1 %2) query# mapped-vals#)))
+    (throw (ex-info (s/explain-str ::gensql body) {}))))
 
 (defmacro with-conformer
   [bind & body]
@@ -63,6 +66,18 @@
 (s/def ::non-blank-strings (s/coll-of ::non-blank-string))
 (s/def ::valid-str-param (s/and ::->string ::non-blank-string))
 (s/def ::valid-str-params (s/coll-of ::valid-str-param))
+(s/def ::symbol symbol?)
+
+(s/def ::valid-args-count
+  (fn [[args valid-count]] (= valid-count (count args))))
+
+(s/def ::valid-conformers
+  (fn [[columns clause-columns]]
+    (every? #(some? (:conformer %))
+            (filter #((set (map str clause-columns)) (:name %)) columns))))
+
+(s/def ::valid-selects (fn [[columns selected]]
+                         (every? (set (map #(:name %) columns)) (map str selected))))
 
 (s/def ::->string
   (s/and some?
@@ -78,49 +93,40 @@
 
 (s/def ::->column-type (with-conformer [conformer value] (s/conform conformer value)))
 
-(s/def ::valid-selects (fn [[columns selected]]
-                         (every? (set (map #(:name %) columns)) (map str selected))))
-
 (s/def ::->columns-str
   (s/and ::valid-selects
          (with-conformer [columns selected] (str/join ", " selected))))
 
-(s/def ::->select-part
-  (with-conformer [query & clauses]
-                  (let [[query-part table-name & fields] query]
-                    (if-let [table (get @table-container (s/conform ::valid-str-param table-name))]
-                      (if (s/valid? ::valid-selects [(:columns table) fields])
-                        [table clauses]
-                        (throw (ex-info "invalid query selected fields" {})))
-                      (throw (ex-info (format "table with name %s not found" (str table-name)) {}))))))
+(s/def ::->table
+  (s/and ::valid-str-param
+   (with-conformer name (get @table-container name))))
 
-(s/def ::->where-params-part
-  (with-conformer [table clauses]
-                  (let [res (apply into []
-                                   (for [[query-part column op value] clauses]
-                                     (when (= query-part 'where)
-                                       (if-let [params-part (s/conform ::valid-str-params [column op value])]
-                                         [params-part]
-                                         (throw (ex-info "invalid where clause parameters" {}))))))]
+(s/def ::->select
+  (s/and
+    (s/cat :_ #(= % 'from)
+           :from (s/* ::symbol))
+    (with-conformer from (:from from))
+    (s/cat :table ::->table
+           :fields (s/* ::symbol))
+    (with-conformer schema [(:columns (:table schema)) (:fields schema)])
+    ::valid-selects
+    (with-conformer columns-fields (first columns-fields))))
 
-                    [table res])))
-
-(s/def ::->where-columns-part
-  (with-conformer [table selected-columns]
-                  (if (= ::s/invalid selected-columns)
-                    selected-columns
-                    (apply into []
-                           (for [[column-name op value]  selected-columns]
-                             (if-let [column (first (filter #(= column-name (:name %)) (:columns table)))]
-                               (when-not (s/valid? some? (:conformer column))
-                                 (throw (ex-info (format "no type converter for column %s" column-name) {})))
-                               (throw (ex-info (format "there is no such column as %s in table %s" column-name) {}))))))))
+(s/def ::->where
+  (s/and
+    (s/cat :_ #(= % 'where)
+           :where (s/* any?))
+    (with-conformer res [(:where res) 3])
+    ::valid-args-count
+    (with-conformer args-count (first (first args-count)))))
 
 (s/def ::gensql
   (s/and
-    ::->select-part
-    ::->where-params-part
-    ::->where-columns-part))
+    (s/cat :select ::->select
+           :where-columns  (s/* ::->where))
+    (with-conformer result [(:select result) (:where-columns result)])
+    ::valid-selects
+    ::valid-conformers))
 
 (defmacro test-gensql
   []
