@@ -27,16 +27,16 @@
       (throw (ex-info (s/explain-str ::valid-str-params [name type]) {})))))
 
 (defmacro from
-  [& [table & fields]]
+  [table & fields]
   (let [selected-fields (if-not (empty? fields)
                           (str/join ", " (filter #(complement (str/blank? %)) (map name fields)))
                           "*")]
-    `(str "select " ~selected-fields " from " ~(name table))))
+    `(str/join " " ["select" ~selected-fields "from" ~(name table)])))
 
 (defmacro where
-  [& [column op value]]
+  [column op value]
   `(let [[column-name# op# value#] (s/conform ::non-blank-strings [~(name column) ~(str op) ~(str value)])]
-     (str " where " column-name# " " op# " " value#)))
+     (str/join " " ["where" column-name# op# value#])))
 
 (defmacro gensql
   [& body]
@@ -49,7 +49,9 @@
                                                 (rest body)))
              mapped-vals# (for [[k# v#] column-parameter#]
                             [v# (str (s/conform (get column-conformer# k#) (get ~locals v#)))])
-             query# (reduce str ~@body)]
+             query# (reduce (fn [q# & clauses#]
+                              (str/join " " [q# (reduce str clauses#)]))
+                            (list ~@body))]
          (reduce #(apply str/replace %1 %2) query# mapped-vals#)))
     (throw (ex-info (s/explain-str ::gensql body) {}))))
 
@@ -71,13 +73,13 @@
 (s/def ::valid-args-count
   (fn [[args valid-count]] (= valid-count (count args))))
 
+(s/def ::valid-selects (fn [[columns selected]]
+                         (every? (set (map #(:name %) columns)) (map str selected))))
+
 (s/def ::valid-conformers
   (fn [[columns clause-columns]]
     (every? #(some? (:conformer %))
             (filter #((set (map str clause-columns)) (:name %)) columns))))
-
-(s/def ::valid-selects (fn [[columns selected]]
-                         (every? (set (map #(:name %) columns)) (map str selected))))
 
 (s/def ::->string
   (s/and some?
